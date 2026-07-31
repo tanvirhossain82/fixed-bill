@@ -158,10 +158,18 @@ export default function App() {
     () => unbilledPurchases.filter((p) => p.vendor === genVendor),
     [unbilledPurchases, genVendor]
   );
+  // ---- Bill mode: bill one station at a time, or all stations combined into one bill ----
+  const [billMode, setBillMode] = useState<'single' | 'combined'>('single');
+  function changeBillMode(m: 'single' | 'combined') {
+    setBillMode(m);
+    setSelectedIds(new Set());
+  }
   function changeGenVendor(v: string) {
     setGenVendor(v);
     setSelectedIds(new Set());
   }
+  // Purchases actually offered for selection, depending on the current bill mode
+  const activeUnbilledPurchases = billMode === 'combined' ? unbilledPurchases : vendorUnbilledPurchases;
   const selectedTotal = useMemo(
     () => unbilledPurchases.filter((p) => selectedIds.has(p.id)).reduce((s, p) => s + Number(p.amount), 0),
     [unbilledPurchases, selectedIds]
@@ -175,22 +183,28 @@ export default function App() {
     });
   }
   function selectAll() {
-    setSelectedIds(new Set(vendorUnbilledPurchases.map((p) => p.id)));
+    setSelectedIds(new Set(activeUnbilledPurchases.map((p) => p.id)));
   }
   function clearAll() { setSelectedIds(new Set()); }
 
   async function generateBill() {
-    if (selectedIds.size === 0 || !genVendor) return;
+    if (selectedIds.size === 0) return;
+    if (billMode === 'single' && !genVendor) return;
     setGenerating(true);
     const seq = (meta?.bill_seq || 1);
     const billNo = `NP-CNG-${String(seq).padStart(3, '0')}`;
     const total = selectedTotal;
 
+    // For a combined bill, the "vendor" label lists every station included in it.
+    const selectedPurchases = unbilledPurchases.filter((p) => selectedIds.has(p.id));
+    const distinctVendors = Array.from(new Set(selectedPurchases.map((p) => p.vendor || t(lang, 'unassignedVendor'))));
+    const vendorLabel = billMode === 'combined' ? distinctVendors.join(', ') : genVendor;
+
     const { data: billData, error: billErr } = await supabase.from('bills').insert({
       bill_no: billNo, date: billDate, total_amount: total,
       status: 'submitted', submitted_date: billDate,
       preparer: preparer || null, remarks: billRemarks || null,
-      vendor: genVendor || null,
+      vendor: vendorLabel || null,
     }).select().single();
     if (billErr || !billData) {
       toast(t(lang, 'toastSaved'), 'err');
@@ -222,21 +236,46 @@ export default function App() {
       status: 'paid', payment_date: date, payment_amount: amount,
     }).eq('id', payTarget.id);
     if (error) { toast(t(lang, 'toastSaved'), 'err'); return; }
-    // Auto ledger entry (payment → decreases payable), tagged to the bill's station
-    await supabase.from('ledger_entries').insert({
-      type: 'payment', date, amount, ref: payTarget.bill_no,
-      note: lang === 'bn' ? 'বিল পেমেন্ট' : 'Bill payment',
-      source_bill_id: payTarget.id, auto: true, vendor: payTarget.vendor || null,
+
+    // A bill may cover more than one station (combined billing), so the payment must be
+    // split across each station's own ledger, proportional to how much of the bill came
+    // from that station — otherwise a single station's payable would absorb the whole payment.
+    const billPurchases = purchases.filter((p) => p.bill_id === payTarget.id);
+    const perVendorTotal = new Map<string, number>();
+    billPurchases.forEach((p) => {
+      const key = p.vendor || '';
+      perVendorTotal.set(key, (perVendorTotal.get(key) || 0) + Number(p.amount));
     });
+    if (perVendorTotal.size === 0) {
+      // Fallback (e.g. source purchases were deleted): record against the bill's own vendor field.
+      perVendorTotal.set(payTarget.vendor || '', Number(payTarget.total_amount) || amount);
+    }
+    const billTotal = Array.from(perVendorTotal.values()).reduce((s, v) => s + v, 0) || amount;
+    const paymentNote = lang === 'bn' ? 'বিল পেমেন্ট' : 'Bill payment';
+    const entries = Array.from(perVendorTotal.entries());
+    let allocated = 0;
+    const inserts = entries.map(([vendor, vendorTotal], idx) => {
+      // Give the last station whatever remains, so rounding never loses or invents a few paisa.
+      const share = idx === entries.length - 1
+        ? Number((amount - allocated).toFixed(2))
+        : Number(((amount * vendorTotal) / billTotal).toFixed(2));
+      if (idx !== entries.length - 1) allocated += share;
+      return {
+        type: 'payment' as const, date, amount: share, ref: payTarget.bill_no,
+        note: paymentNote, source_bill_id: payTarget.id, auto: true, vendor: vendor || null,
+      };
+    });
+
+    const { data: ledgerData, error: ledErr } = await supabase.from('ledger_entries').insert(inserts).select();
+    if (ledErr) { toast(t(lang, 'toastSaved'), 'err'); }
+
     setBills((prev) => prev.map((b) => b.id === payTarget.id
       ? { ...b, status: 'paid', payment_date: date, payment_amount: amount } : b));
-    setLedger((prev) => [...prev, {
-      id: 'temp-' + Date.now(), type: 'payment', date, amount,
-      ref: payTarget.bill_no, note: lang === 'bn' ? 'বিল পেমেন্ট' : 'Bill payment',
-      source_purchase_id: null, source_bill_id: payTarget.id, auto: true,
-      vendor: payTarget.vendor || null,
-      created_at: new Date().toISOString(),
-    } as LedgerEntry]);
+    if (ledgerData) {
+      setLedger((prev) => [...prev, ...(ledgerData as LedgerEntry[])]);
+    } else {
+      await loadAll();
+    }
     setPayTarget(null);
     toast(t(lang, 'toastPaymentRecorded'));
   }
@@ -434,7 +473,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 print:hidden">
         {/* Stat cards */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
           <StatCard icon={TrendingUp} label={t(lang, 'gPurchase')} value={fmt(stats.totalPurchase)} color="emerald" />
@@ -622,12 +661,37 @@ export default function App() {
                 </h2>
                 <div className="space-y-3">
                   <div>
-                    <label className={labelCls}>{t(lang, 'vendorFilter')}</label>
-                    <select value={genVendor} onChange={(e) => changeGenVendor(e.target.value)} className={inputCls}>
-                      {unbilledVendorList.length === 0 && <option value="">—</option>}
-                      {unbilledVendorList.map((v) => <option key={v} value={v}>{v}</option>)}
-                    </select>
+                    <label className={labelCls}>{t(lang, 'billMode')}</label>
+                    <div className="flex gap-1.5 p-1 bg-slate-100 rounded-lg">
+                      <button
+                        onClick={() => changeBillMode('single')}
+                        className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                          billMode === 'single' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                        }`}
+                      >
+                        {t(lang, 'modeSingleStation')}
+                      </button>
+                      <button
+                        onClick={() => changeBillMode('combined')}
+                        className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                          billMode === 'combined' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                        }`}
+                      >
+                        {t(lang, 'modeCombinedStations')}
+                      </button>
+                    </div>
                   </div>
+                  {billMode === 'single' ? (
+                    <div>
+                      <label className={labelCls}>{t(lang, 'vendorFilter')}</label>
+                      <select value={genVendor} onChange={(e) => changeGenVendor(e.target.value)} className={inputCls}>
+                        {unbilledVendorList.length === 0 && <option value="">—</option>}
+                        {unbilledVendorList.map((v) => <option key={v} value={v}>{v}</option>)}
+                      </select>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-slate-400 bg-slate-50 rounded-lg px-3 py-2 leading-relaxed">{t(lang, 'combinedHint')}</p>
+                  )}
                   <div>
                     <label className={labelCls}>{t(lang, 'billNo')}</label>
                     <input disabled value={`NP-CNG-${String(meta?.bill_seq || 1).padStart(3, '0')}`}
@@ -651,7 +715,7 @@ export default function App() {
                     <span className="text-sm text-slate-600">{t(lang, 'selectedTotal')}</span>
                     <span className="font-bold text-emerald-700">{fmt(selectedTotal)}</span>
                   </div>
-                  <button onClick={generateBill} disabled={selectedIds.size === 0 || generating || !genVendor}
+                  <button onClick={generateBill} disabled={selectedIds.size === 0 || generating || (billMode === 'single' && !genVendor)}
                     className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 text-white font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors">
                     <FileText className="w-4 h-4" /> {t(lang, 'generateBill')}
                   </button>
@@ -666,7 +730,7 @@ export default function App() {
                     <h2 className="font-bold text-slate-800">{t(lang, 'selectUnbilled')}</h2>
                     <p className="text-xs text-slate-400 mt-0.5">{t(lang, 'selectUnbilledHint')}</p>
                   </div>
-                  {vendorUnbilledPurchases.length > 0 && (
+                  {activeUnbilledPurchases.length > 0 && (
                     <div className="flex gap-1.5">
                       <button onClick={selectAll} className="px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 rounded-md hover:bg-emerald-100">
                         {lang === 'bn' ? 'সব বাছাই' : 'Select all'}
@@ -679,9 +743,9 @@ export default function App() {
                 </div>
                 {unbilledPurchases.length === 0 ? (
                   <p className="px-5 py-10 text-center text-sm text-slate-400">{t(lang, 'emptyUnbilled')}</p>
-                ) : !genVendor ? (
+                ) : billMode === 'single' && !genVendor ? (
                   <p className="px-5 py-10 text-center text-sm text-slate-400">{t(lang, 'pickVendorFirst')}</p>
-                ) : vendorUnbilledPurchases.length === 0 ? (
+                ) : activeUnbilledPurchases.length === 0 ? (
                   <p className="px-5 py-10 text-center text-sm text-slate-400">{t(lang, 'noVendorPurchases')}</p>
                 ) : (
                   <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
@@ -690,13 +754,16 @@ export default function App() {
                         <tr className="bg-slate-50 text-slate-500 text-xs">
                           <th className="px-3 py-2 w-8"></th>
                           <th className="px-3 py-2 text-left font-medium">{t(lang, 'thDate')}</th>
+                          {billMode === 'combined' && (
+                            <th className="px-3 py-2 text-left font-medium">{t(lang, 'thVendorCol')}</th>
+                          )}
                           <th className="px-3 py-2 text-left font-medium">{t(lang, 'thFuel')}</th>
                           <th className="px-3 py-2 text-right font-medium">{t(lang, 'thQty')}</th>
                           <th className="px-3 py-2 text-right font-medium">{t(lang, 'thMoney')}</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {vendorUnbilledPurchases.map((p) => (
+                        {activeUnbilledPurchases.map((p) => (
                           <tr key={p.id}
                             className={`cursor-pointer transition-colors ${selectedIds.has(p.id) ? 'bg-emerald-50' : 'hover:bg-slate-50'}`}
                             onClick={() => toggleSelect(p.id)}>
@@ -708,6 +775,9 @@ export default function App() {
                               </div>
                             </td>
                             <td className="px-3 py-2.5 whitespace-nowrap">{p.date}</td>
+                            {billMode === 'combined' && (
+                              <td className="px-3 py-2.5 text-slate-500">{p.vendor || '—'}</td>
+                            )}
                             <td className="px-3 py-2.5 font-medium">{p.fuel_type}</td>
                             <td className="px-3 py-2.5 text-right whitespace-nowrap">{p.quantity} {p.unit}</td>
                             <td className="px-3 py-2.5 text-right font-semibold">{fmt(Number(p.amount))}</td>
@@ -751,7 +821,14 @@ export default function App() {
                     {bills.map((b) => (
                       <tr key={b.id} className="hover:bg-slate-50/70 transition-colors">
                         <td className="px-3 py-2.5 font-mono font-medium text-slate-700">{b.bill_no}</td>
-                        <td className="px-3 py-2.5 text-slate-600">{b.vendor || '—'}</td>
+                        <td className="px-3 py-2.5 text-slate-600">
+                          {b.vendor || '—'}
+                          {b.vendor && b.vendor.includes(',') && (
+                            <span className="ml-1.5 inline-block px-1.5 py-0.5 text-[10px] font-medium bg-indigo-50 text-indigo-700 rounded-full align-middle">
+                              {t(lang, 'combinedBadge')}
+                            </span>
+                          )}
+                        </td>
                         <td className="px-3 py-2.5 whitespace-nowrap">{b.date}</td>
                         <td className="px-3 py-2.5 text-right font-semibold">{fmt(Number(b.total_amount))}</td>
                         <td className="px-3 py-2.5 text-center">
@@ -1086,8 +1163,8 @@ function EditLedgerModal({ data, lang, onClose, onSave }: {
         <div className="grid grid-cols-1 gap-3">
           <div><label className={labelCls}>{t(lang, 'date')}</label><input type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} className={inputCls} /></div>
           <div><label className={labelCls}>{t(lang, 'amount')}</label><input type="number" step="0.01" value={f.amount} onChange={(e) => setF({ ...f, amount: +e.target.value })} className={inputCls} /></div>
-          <div><label className={labelCls}>{t(lang, 'ref')}</label><input value={f.ref ?? ''} onChange={(e) => setF({ ...f, ref: e.target.value || null })} className={inputCls} /></div>
-          <div><label className={labelCls}>{t(lang, 'note')}</label><input value={f.note ?? ''} onChange={(e) => setF({ ...f, note: e.target.value || null })} className={inputCls} /></div>
+          <div><label className={labelCls}>{t(lang, 'thRef')}</label><input value={f.ref ?? ''} onChange={(e) => setF({ ...f, ref: e.target.value || null })} className={inputCls} /></div>
+          <div><label className={labelCls}>{t(lang, 'thDesc')}</label><input value={f.note ?? ''} onChange={(e) => setF({ ...f, note: e.target.value || null })} className={inputCls} /></div>
           <div><label className={labelCls}>{t(lang, 'nmVendor')}</label><input value={f.vendor ?? ''} onChange={(e) => setF({ ...f, vendor: e.target.value || null })} className={inputCls} /></div>
         </div>
         <div className="mt-5 flex gap-2 justify-end">

@@ -14,14 +14,16 @@ type Props = {
 export default function BillViewModal({ bill, purchases, lang, onClose }: Props) {
   const total = Number(bill.total_amount) || 0;
   const words = lang === 'bn' ? amountInWordsBn(total) : amountInWordsEn(total);
+  const distinctVendors = Array.from(new Set(purchases.map((p) => p.vendor || '—')));
+  const isCombined = distinctVendors.length > 1;
 
   function handlePrint() {
     window.print();
   }
 
   return (
-    <div className="fixed inset-0 z-40 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 print:p-0 print:bg-white print:static print:block">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-auto print:max-h-none print:shadow-none print:rounded-none print:max-w-none">
+    <div className="fixed inset-0 z-40 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 print:contents">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-auto print:contents">
         {/* Header bar */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 print:hidden">
           <h3 className="text-lg font-bold text-slate-800">{t(lang, 'billViewTitle')}</h3>
@@ -87,24 +89,30 @@ export default function BillViewModal({ bill, purchases, lang, onClose }: Props)
           <table className="w-full text-sm border border-slate-300 mb-6 print:mb-2 print:text-xs">
             <thead>
               <tr className="bg-emerald-50 text-slate-700">
-                <th className="border border-slate-300 px-2 py-2 print:py-1 text-left">#</th>
-                <th className="border border-slate-300 px-2 py-2 print:py-1 text-left">{t(lang, 'thDate')}</th>
-                <th className="border border-slate-300 px-2 py-2 print:py-1 text-left">{t(lang, 'thFuel')}</th>
-                <th className="border border-slate-300 px-2 py-2 print:py-1 text-right">{t(lang, 'thQty')}</th>
-                <th className="border border-slate-300 px-2 py-2 print:py-1 text-right">{t(lang, 'thRate')}</th>
+                <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">#</th>
+                <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">{t(lang, 'thDate')}</th>
+                {isCombined && (
+                  <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">{t(lang, 'thVendorCol')}</th>
+                )}
+                <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">{t(lang, 'thFuel')}</th>
+                <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">{t(lang, 'thQty')}</th>
+                <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">{t(lang, 'thRate')}</th>
                 <th className="border border-slate-300 px-2 py-2 print:py-1 text-right">{t(lang, 'thMoney')}</th>
               </tr>
             </thead>
             <tbody>
               {purchases.map((p, i) => (
                 <tr key={p.id} className="hover:bg-slate-50">
-                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5">{i + 1}</td>
-                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5">{p.date}</td>
-                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5">{p.fuel_type}</td>
-                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-right">
+                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">{i + 1}</td>
+                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">{p.date}</td>
+                  {isCombined && (
+                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">{p.vendor || '—'}</td>
+                  )}
+                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">{p.fuel_type}</td>
+                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">
                     {p.quantity} {p.unit}
                   </td>
-                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-right">
+                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">
                     {p.rate ? '৳ ' + Number(p.rate).toFixed(2) : '—'}
                   </td>
                   <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-right font-medium">
@@ -115,7 +123,7 @@ export default function BillViewModal({ bill, purchases, lang, onClose }: Props)
             </tbody>
             <tfoot>
               <tr className="bg-emerald-100 font-bold">
-                <td colSpan={5} className="border border-slate-300 px-2 py-2 print:py-1 text-right">{t(lang, 'billTotal')}</td>
+                <td colSpan={isCombined ? 6 : 5} className="border border-slate-300 px-2 py-2 print:py-1 text-right">{t(lang, 'billTotal')}</td>
                 <td className="border border-slate-300 px-2 py-2 print:py-1 text-right">{fmt(total)}</td>
               </tr>
             </tfoot>

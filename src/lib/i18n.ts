@@ -72,6 +72,16 @@ export const STRINGS = {
     en: 'All purchases have already been billed. Add new purchase entries.',
   },
 
+  // Combined billing mode
+  billMode: { bn: 'বিলের ধরণ', en: 'Bill Type' },
+  modeSingleStation: { bn: 'প্রতি স্টেশন আলাদা', en: 'Per Station' },
+  modeCombinedStations: { bn: 'সব স্টেশন একসাথে', en: 'All Stations Combined' },
+  combinedHint: {
+    bn: 'সব ফিলিং স্টেশনের আনবিলড ক্রয় এখানে একসাথে দেখানো হচ্ছে। যেকোনো স্টেশন থেকে ইচ্ছেমতো বাছাই করে একটি বিল তৈরি করুন। পেমেন্ট নথিভুক্ত করলে তা প্রতিটি স্টেশনের হিসাব লেজারে সঠিক অনুপাতে ভাগ হয়ে যাবে।',
+    en: 'All filling stations\u2019 unbilled purchases are shown together here — pick any mix and generate one bill. When the payment is recorded, it will be split proportionally across each station\u2019s own account ledger.',
+  },
+  combinedBadge: { bn: 'একত্রিত', en: 'Combined' },
+
   // Ledger
   billLedger: { bn: 'বিল লেজার — জমা ও পেমেন্ট হিসাব', en: 'Bill Ledger — Submission & Payment' },
   thBillNo: { bn: 'বিল নং', en: 'Bill No.' },
