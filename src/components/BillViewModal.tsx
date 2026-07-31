@@ -97,7 +97,7 @@ export default function BillViewModal({ bill, purchases, lang, onClose }: Props)
                 <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">{t(lang, 'thFuel')}</th>
                 <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">{t(lang, 'thQty')}</th>
                 <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">{t(lang, 'thRate')}</th>
-                <th className="border border-slate-300 px-2 py-2 print:py-1 text-right">{t(lang, 'thMoney')}</th>
+                <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">{t(lang, 'thMoney')}</th>
               </tr>
             </thead>
             <tbody>
@@ -115,7 +115,7 @@ export default function BillViewModal({ bill, purchases, lang, onClose }: Props)
                   <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">
                     {p.rate ? '৳ ' + Number(p.rate).toFixed(2) : '—'}
                   </td>
-                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-right font-medium">
+                  <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center font-medium">
                     {fmt(Number(p.amount))}
                   </td>
                 </tr>
@@ -124,7 +124,7 @@ export default function BillViewModal({ bill, purchases, lang, onClose }: Props)
             <tfoot>
               <tr className="bg-emerald-100 font-bold">
                 <td colSpan={isCombined ? 6 : 5} className="border border-slate-300 px-2 py-2 print:py-1 text-right">{t(lang, 'billTotal')}</td>
-                <td className="border border-slate-300 px-2 py-2 print:py-1 text-right">{fmt(total)}</td>
+                <td className="border border-slate-300 px-2 py-2 print:py-1 text-center">{fmt(total)}</td>
               </tr>
             </tfoot>
           </table>

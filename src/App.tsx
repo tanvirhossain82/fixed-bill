@@ -6,6 +6,7 @@ import { toast } from '@/components/Toaster';
 import Toaster from '@/components/Toaster';
 import Autocomplete from '@/components/Autocomplete';
 import BillViewModal from '@/components/BillViewModal';
+import LedgerStatementModal from '@/components/LedgerStatementModal';
 import PayModal from '@/components/PayModal';
 import {
   Fuel, Wallet, FileText, BookOpen, Plus, Trash2, CheckCircle2, Clock,
@@ -408,6 +409,51 @@ export default function App() {
     });
   }, [filteredLedger]);
   const outstanding = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].balance : 0;
+
+  // ---- Station ledger statement: month / date-wise filter for Print & PDF ----
+  const [nmStmtMonth, setNmStmtMonth] = useState('');
+  const [nmStmtFrom, setNmStmtFrom] = useState('');
+  const [nmStmtTo, setNmStmtTo] = useState('');
+  const [showStatement, setShowStatement] = useState(false);
+
+  function pickMonth(m: string) {
+    setNmStmtMonth(m);
+    if (m) {
+      const [y, mo] = m.split('-').map(Number);
+      const lastDay = new Date(y, mo, 0).getDate();
+      setNmStmtFrom(`${m}-01`);
+      setNmStmtTo(`${m}-${String(lastDay).padStart(2, '0')}`);
+    } else {
+      setNmStmtFrom(''); setNmStmtTo('');
+    }
+  }
+  function clearStmtFilter() {
+    setNmStmtMonth(''); setNmStmtFrom(''); setNmStmtTo('');
+  }
+
+  const stmtStartIndex = useMemo(() => {
+    if (!nmStmtFrom) return 0;
+    return ledgerRows.findIndex((r) => r.date >= nmStmtFrom);
+  }, [ledgerRows, nmStmtFrom]);
+
+  const statementRows = useMemo(() => {
+    if (!nmStmtFrom && !nmStmtTo) return ledgerRows;
+    return ledgerRows.filter((r) => (!nmStmtFrom || r.date >= nmStmtFrom) && (!nmStmtTo || r.date <= nmStmtTo));
+  }, [ledgerRows, nmStmtFrom, nmStmtTo]);
+
+  const statementOpeningBalance = useMemo(() => {
+    if (!nmStmtFrom || stmtStartIndex <= 0) return 0;
+    return ledgerRows[stmtStartIndex - 1].balance;
+  }, [ledgerRows, nmStmtFrom, stmtStartIndex]);
+
+  const statementClosingBalance = statementRows.length > 0
+    ? statementRows[statementRows.length - 1].balance
+    : statementOpeningBalance;
+
+  const statementPeriodLabel = useMemo(() => {
+    if (!nmStmtFrom && !nmStmtTo) return t(lang, 'stmtAllTime');
+    return `${nmStmtFrom || '…'} — ${nmStmtTo || '…'}`;
+  }, [nmStmtFrom, nmStmtTo, lang]);
 
   // Outstanding balance per station, for the selector pills
   const vendorBalances = useMemo(() => {
@@ -900,8 +946,9 @@ export default function App() {
                   </div>
                   <div>
                     <label className={labelCls}>{t(lang, 'nmAmount')}</label>
-                    <input type="number" inputMode="decimal" step="0.01" min="0" value={nmAmount}
-                      onChange={(e) => setNmAmount(e.target.value)} placeholder="0.00" className={inputCls} />
+                    <input type="text" inputMode="decimal" value={nmAmount}
+                      onChange={(e) => { const v = e.target.value; if (/^\d*\.?\d*$/.test(v)) setNmAmount(v); }}
+                      placeholder="0.00" className={inputCls} />
                   </div>
                   <div>
                     <label className={labelCls}>{t(lang, 'nmRef')}</label>
@@ -949,15 +996,46 @@ export default function App() {
               )}
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                 <div className="px-5 py-3.5 border-b border-slate-200">
-                  <h2 className="font-bold text-slate-800">
-                    {t(lang, 'nmLedgerTitle')}
-                    {selectedLedgerVendor && (
-                      <span className="text-slate-400 font-normal">
-                        {' — '}{selectedLedgerVendor === '__unassigned__' ? t(lang, 'unassignedVendor') : selectedLedgerVendor}
-                      </span>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h2 className="font-bold text-slate-800">
+                        {t(lang, 'nmLedgerTitle')}
+                        {selectedLedgerVendor && (
+                          <span className="text-slate-400 font-normal">
+                            {' — '}{selectedLedgerVendor === '__unassigned__' ? t(lang, 'unassignedVendor') : selectedLedgerVendor}
+                          </span>
+                        )}
+                      </h2>
+                      <p className="text-xs text-slate-400 mt-0.5">{t(lang, 'nmLedgerHint')}</p>
+                    </div>
+                    <button onClick={() => setShowStatement(true)} disabled={ledgerRows.length === 0}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
+                      <Printer className="w-3.5 h-3.5" /> {t(lang, 'nmPrintPdf')}
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2 mt-3">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-500 mb-1">{t(lang, 'nmStmtMonth')}</label>
+                      <input type="month" value={nmStmtMonth} onChange={(e) => pickMonth(e.target.value)}
+                        className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500" />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-500 mb-1">{t(lang, 'nmStmtFrom')}</label>
+                      <input type="date" value={nmStmtFrom} onChange={(e) => { setNmStmtMonth(''); setNmStmtFrom(e.target.value); }}
+                        className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500" />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-500 mb-1">{t(lang, 'nmStmtTo')}</label>
+                      <input type="date" value={nmStmtTo} onChange={(e) => { setNmStmtMonth(''); setNmStmtTo(e.target.value); }}
+                        className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500" />
+                    </div>
+                    {(nmStmtMonth || nmStmtFrom || nmStmtTo) && (
+                      <button onClick={clearStmtFilter}
+                        className="px-2.5 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors">
+                        {t(lang, 'nmStmtClear')}
+                      </button>
                     )}
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-0.5">{t(lang, 'nmLedgerHint')}</p>
+                  </div>
                 </div>
                 {ledgerRows.length === 0 ? (
                   <p className="px-5 py-10 text-center text-sm text-slate-400">{t(lang, 'emptyNm')}</p>
@@ -967,7 +1045,7 @@ export default function App() {
                       <thead className="sticky top-0">
                         <tr className="bg-slate-50 text-slate-500 text-xs">
                           <th className="px-3 py-2 text-left font-medium">{t(lang, 'thDate')}</th>
-                          <th className="px-3 py-2 text-left font-medium">{t(lang, 'thDesc')}</th>
+                          <th className="px-3 py-2 text-left font-medium min-w-[240px]">{t(lang, 'thDesc')}</th>
                           <th className="px-3 py-2 text-left font-medium">{t(lang, 'thRef')}</th>
                           <th className="px-3 py-2 text-right font-medium">{t(lang, 'thPurchaseCol')}</th>
                           <th className="px-3 py-2 text-right font-medium">{t(lang, 'thPaymentCol')}</th>
@@ -1025,6 +1103,17 @@ export default function App() {
       )}
       {viewBill && (
         <BillViewModal bill={viewBill} purchases={viewBillPurchases} lang={lang} onClose={() => setViewBill(null)} />
+      )}
+      {showStatement && (
+        <LedgerStatementModal
+          station={selectedLedgerVendor === '__unassigned__' ? t(lang, 'unassignedVendor') : selectedLedgerVendor || '—'}
+          lang={lang}
+          rows={statementRows}
+          openingBalance={statementOpeningBalance}
+          closingBalance={statementClosingBalance}
+          periodLabel={statementPeriodLabel}
+          onClose={() => setShowStatement(false)}
+        />
       )}
 
       {/* Edit modals */}
@@ -1151,8 +1240,13 @@ function EditLedgerModal({ data, lang, onClose, onSave }: {
   data: LedgerEntry; lang: Lang; onClose: () => void; onSave: (l: LedgerEntry) => void;
 }) {
   const [f, setF] = useState<LedgerEntry>(data);
+  const [amountStr, setAmountStr] = useState(String(data.amount ?? ''));
   const inputCls = 'w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500';
   const labelCls = 'block text-xs font-medium text-slate-600 mb-1';
+  function handleSave() {
+    const amt = parseFloat(amountStr);
+    onSave({ ...f, amount: isNaN(amt) ? 0 : amt });
+  }
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6">
@@ -1160,16 +1254,21 @@ function EditLedgerModal({ data, lang, onClose, onSave }: {
           <h3 className="font-bold text-slate-800">{t(lang, 'editLedger')}</h3>
           <button onClick={onClose} className="p-1 rounded text-slate-400 hover:text-slate-600 hover:bg-slate-100"><X className="w-5 h-5" /></button>
         </div>
-        <div className="grid grid-cols-1 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <div><label className={labelCls}>{t(lang, 'date')}</label><input type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} className={inputCls} /></div>
-          <div><label className={labelCls}>{t(lang, 'amount')}</label><input type="number" step="0.01" value={f.amount} onChange={(e) => setF({ ...f, amount: +e.target.value })} className={inputCls} /></div>
+          <div>
+            <label className={labelCls}>{t(lang, 'amount')}</label>
+            <input type="text" inputMode="decimal" value={amountStr}
+              onChange={(e) => { const v = e.target.value; if (/^\d*\.?\d*$/.test(v)) setAmountStr(v); }}
+              className={inputCls} />
+          </div>
+          <div className="col-span-2"><label className={labelCls}>{t(lang, 'thDesc')}</label><input value={f.note ?? ''} onChange={(e) => setF({ ...f, note: e.target.value || null })} className={inputCls} /></div>
           <div><label className={labelCls}>{t(lang, 'thRef')}</label><input value={f.ref ?? ''} onChange={(e) => setF({ ...f, ref: e.target.value || null })} className={inputCls} /></div>
-          <div><label className={labelCls}>{t(lang, 'thDesc')}</label><input value={f.note ?? ''} onChange={(e) => setF({ ...f, note: e.target.value || null })} className={inputCls} /></div>
           <div><label className={labelCls}>{t(lang, 'nmVendor')}</label><input value={f.vendor ?? ''} onChange={(e) => setF({ ...f, vendor: e.target.value || null })} className={inputCls} /></div>
         </div>
         <div className="mt-5 flex gap-2 justify-end">
           <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors">{t(lang, 'cancel')}</button>
-          <button onClick={() => onSave(f)} className="px-4 py-2 text-sm font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors">{t(lang, 'save')}</button>
+          <button onClick={handleSave} className="px-4 py-2 text-sm font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors">{t(lang, 'save')}</button>
         </div>
       </div>
     </div>
