@@ -3,6 +3,10 @@ export type Lang = 'bn' | 'en';
 export const STRINGS = {
   // Header
   eyebrow: { bn: 'Nippon Paint (Bangladesh) Private Limited', en: 'Nippon Paint (Bangladesh) Private Limited' },
+  companyAddress: {
+    bn: 'আর.এস. প্লট নং: ৩৩৩-৩৩৭, ৬৪-৬৭, বরংগাইল, শিবালয়, মানিকগঞ্জ।',
+    en: 'R.S. Plot No: 333-337, 64-67, Borangail, Shibalaya, Manikganj.',
+  },
   title: { bn: 'জ্বালানি ক্রয় ও বিল ব্যবস্থাপনা', en: 'Fuel Purchase & Bill Management' },
   subtitle: {
     bn: 'গাড়ি: Hi-Ace  •  জ্বালানি সরবরাহকারী: মধুমতি সিএনজি পাম্প (Modhumoti CNG Pump)  •  CNG ও Petrol',
@@ -228,7 +232,7 @@ export const STRINGS = {
   // Units & fuel
   unitLitre: { bn: 'লিটার', en: 'Litre' },
   unitKg: { bn: 'কেজি', en: 'Kg' },
-  unitCft: { bn: 'CFT (কিউবিক ফুট)', en: 'CFT (Cubic Feet)' },
+  unitCft: { bn: 'CFT', en: 'CFT' },
 
   // Edit entries
   edit: { bn: 'সম্পাদনা', en: 'Edit' },

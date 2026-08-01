@@ -92,7 +92,7 @@ export default function App() {
     const q = parseFloat(fQty);
     const r = parseFloat(fRate);
     if (q > 0 && r > 0) {
-      setFAmount((q * r).toFixed(2));
+      setFAmount(String(Math.round(q * r)));
     }
   }, [fQty, fRate]);
 
@@ -141,8 +141,10 @@ export default function App() {
   // ---- Bill generation ----
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [billDate, setBillDate] = useState(todayISO());
-  const [preparer, setPreparer] = useState('');
-  const [billRemarks, setBillRemarks] = useState('');
+  const [preparer, setPreparer] = useState(() => localStorage.getItem('billPreparer') || '');
+  const [billRemarks, setBillRemarks] = useState(() => localStorage.getItem('billRemarksDraft') || '');
+  useEffect(() => { localStorage.setItem('billPreparer', preparer); }, [preparer]);
+  useEffect(() => { localStorage.setItem('billRemarksDraft', billRemarks); }, [billRemarks]);
   const [generating, setGenerating] = useState(false);
 
   const unbilledPurchases = useMemo(() => purchases.filter((p) => !p.bill_id), [purchases]);
@@ -222,7 +224,6 @@ export default function App() {
     setBills((prev) => [billData as Bill, ...prev]);
     setMeta((prev) => prev ? { ...prev, bill_seq: seq + 1 } : prev);
     setSelectedIds(new Set());
-    setPreparer(''); setBillRemarks('');
     toast(t(lang, 'toastBillCreated'));
     setGenerating(false);
     setTab('ledger');

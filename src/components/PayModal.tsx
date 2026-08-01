@@ -12,7 +12,7 @@ type Props = {
 
 export default function PayModal({ bill, lang, onClose, onConfirm }: Props) {
   const [date, setDate] = useState(todayISO());
-  const [amount, setAmount] = useState(String(Number(bill.total_amount).toFixed(2)));
+  const [amount, setAmount] = useState(String(Math.round(Number(bill.total_amount))));
 
   function submit() {
     const a = parseFloat(amount);

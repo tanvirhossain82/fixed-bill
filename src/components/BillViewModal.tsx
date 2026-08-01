@@ -46,7 +46,7 @@ export default function BillViewModal({ bill, purchases, lang, onClose }: Props)
               <h1 className="text-xl font-bold text-emerald-800 print:text-base">Nippon Paint (Bangladesh) Pvt. Ltd.</h1>
             </div>
             <p className="text-xs text-slate-500 print:text-[10px] mb-0.5">
-              আর.এস. প্লট নং: ৩৩৩-৩৩৭, ৬৪-৬৭, বরংগাইল, শিবালয়, মানিকগঞ্জ।
+              {t(lang, 'companyAddress')}
             </p>
             <p className="text-sm text-slate-600 print:text-xs">
               {lang === 'bn' ? 'জ্বালানি বিল বিবরণী' : 'Fuel Bill Statement'}
