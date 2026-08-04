@@ -6,6 +6,7 @@ import { toast } from '@/components/Toaster';
 import Toaster from '@/components/Toaster';
 import Autocomplete from '@/components/Autocomplete';
 import BillViewModal from '@/components/BillViewModal';
+import LedgerStatementModal from '@/components/LedgerStatementModal';
 import PayModal from '@/components/PayModal';
 import {
   Fuel, Wallet, FileText, BookOpen, Plus, Trash2, CheckCircle2, Clock,
@@ -114,10 +115,11 @@ export default function App() {
       setSavingPurchase(false);
       return;
     }
-    // Auto-create ledger entry (purchase → increases payable)
+    // Auto-create ledger entry (purchase → increases payable), tagged to this station
     const { error: ledErr } = await supabase.from('ledger_entries').insert({
       type: 'purchase', date: fDate, amount, ref: fReceipt || null,
       note: `${fFuel} — ${qty} ${fUnit}`, source_purchase_id: data.id, auto: true,
+      vendor: fVendor || null,
     });
     if (ledErr) { toast(t(lang, 'toastSaved'), 'err'); setSavingPurchase(false); return; }
     // Reload all data so purchase list, unbilled list, and NM ledger stay in sync
@@ -144,6 +146,31 @@ export default function App() {
   const [generating, setGenerating] = useState(false);
 
   const unbilledPurchases = useMemo(() => purchases.filter((p) => !p.bill_id), [purchases]);
+  const unbilledVendorList = useMemo(() => {
+    const set = new Set<string>();
+    unbilledPurchases.forEach((p) => { if (p.vendor) set.add(p.vendor); });
+    return Array.from(set);
+  }, [unbilledPurchases]);
+  const [genVendor, setGenVendor] = useState('');
+  useEffect(() => {
+    if (!genVendor && unbilledVendorList.length > 0) setGenVendor(unbilledVendorList[0]);
+  }, [unbilledVendorList, genVendor]);
+  const vendorUnbilledPurchases = useMemo(
+    () => unbilledPurchases.filter((p) => p.vendor === genVendor),
+    [unbilledPurchases, genVendor]
+  );
+  // ---- Bill mode: bill one station at a time, or all stations combined into one bill ----
+  const [billMode, setBillMode] = useState<'single' | 'combined'>('single');
+  function changeBillMode(m: 'single' | 'combined') {
+    setBillMode(m);
+    setSelectedIds(new Set());
+  }
+  function changeGenVendor(v: string) {
+    setGenVendor(v);
+    setSelectedIds(new Set());
+  }
+  // Purchases actually offered for selection, depending on the current bill mode
+  const activeUnbilledPurchases = billMode === 'combined' ? unbilledPurchases : vendorUnbilledPurchases;
   const selectedTotal = useMemo(
     () => unbilledPurchases.filter((p) => selectedIds.has(p.id)).reduce((s, p) => s + Number(p.amount), 0),
     [unbilledPurchases, selectedIds]
@@ -157,21 +184,28 @@ export default function App() {
     });
   }
   function selectAll() {
-    setSelectedIds(new Set(unbilledPurchases.map((p) => p.id)));
+    setSelectedIds(new Set(activeUnbilledPurchases.map((p) => p.id)));
   }
   function clearAll() { setSelectedIds(new Set()); }
 
   async function generateBill() {
     if (selectedIds.size === 0) return;
+    if (billMode === 'single' && !genVendor) return;
     setGenerating(true);
     const seq = (meta?.bill_seq || 1);
     const billNo = `NP-CNG-${String(seq).padStart(3, '0')}`;
     const total = selectedTotal;
 
+    // For a combined bill, the "vendor" label lists every station included in it.
+    const selectedPurchases = unbilledPurchases.filter((p) => selectedIds.has(p.id));
+    const distinctVendors = Array.from(new Set(selectedPurchases.map((p) => p.vendor || t(lang, 'unassignedVendor'))));
+    const vendorLabel = billMode === 'combined' ? distinctVendors.join(', ') : genVendor;
+
     const { data: billData, error: billErr } = await supabase.from('bills').insert({
       bill_no: billNo, date: billDate, total_amount: total,
       status: 'submitted', submitted_date: billDate,
       preparer: preparer || null, remarks: billRemarks || null,
+      vendor: vendorLabel || null,
     }).select().single();
     if (billErr || !billData) {
       toast(t(lang, 'toastSaved'), 'err');
@@ -203,20 +237,46 @@ export default function App() {
       status: 'paid', payment_date: date, payment_amount: amount,
     }).eq('id', payTarget.id);
     if (error) { toast(t(lang, 'toastSaved'), 'err'); return; }
-    // Auto ledger entry (payment → decreases payable)
-    await supabase.from('ledger_entries').insert({
-      type: 'payment', date, amount, ref: payTarget.bill_no,
-      note: lang === 'bn' ? 'বিল পেমেন্ট' : 'Bill payment',
-      source_bill_id: payTarget.id, auto: true,
+
+    // A bill may cover more than one station (combined billing), so the payment must be
+    // split across each station's own ledger, proportional to how much of the bill came
+    // from that station — otherwise a single station's payable would absorb the whole payment.
+    const billPurchases = purchases.filter((p) => p.bill_id === payTarget.id);
+    const perVendorTotal = new Map<string, number>();
+    billPurchases.forEach((p) => {
+      const key = p.vendor || '';
+      perVendorTotal.set(key, (perVendorTotal.get(key) || 0) + Number(p.amount));
     });
+    if (perVendorTotal.size === 0) {
+      // Fallback (e.g. source purchases were deleted): record against the bill's own vendor field.
+      perVendorTotal.set(payTarget.vendor || '', Number(payTarget.total_amount) || amount);
+    }
+    const billTotal = Array.from(perVendorTotal.values()).reduce((s, v) => s + v, 0) || amount;
+    const paymentNote = lang === 'bn' ? 'বিল পেমেন্ট' : 'Bill payment';
+    const entries = Array.from(perVendorTotal.entries());
+    let allocated = 0;
+    const inserts = entries.map(([vendor, vendorTotal], idx) => {
+      // Give the last station whatever remains, so rounding never loses or invents a few paisa.
+      const share = idx === entries.length - 1
+        ? Number((amount - allocated).toFixed(2))
+        : Number(((amount * vendorTotal) / billTotal).toFixed(2));
+      if (idx !== entries.length - 1) allocated += share;
+      return {
+        type: 'payment' as const, date, amount: share, ref: payTarget.bill_no,
+        note: paymentNote, source_bill_id: payTarget.id, auto: true, vendor: vendor || null,
+      };
+    });
+
+    const { data: ledgerData, error: ledErr } = await supabase.from('ledger_entries').insert(inserts).select();
+    if (ledErr) { toast(t(lang, 'toastSaved'), 'err'); }
+
     setBills((prev) => prev.map((b) => b.id === payTarget.id
       ? { ...b, status: 'paid', payment_date: date, payment_amount: amount } : b));
-    setLedger((prev) => [...prev, {
-      id: 'temp-' + Date.now(), type: 'payment', date, amount,
-      ref: payTarget.bill_no, note: lang === 'bn' ? 'বিল পেমেন্ট' : 'Bill payment',
-      source_purchase_id: null, source_bill_id: payTarget.id, auto: true,
-      created_at: new Date().toISOString(),
-    } as LedgerEntry]);
+    if (ledgerData) {
+      setLedger((prev) => [...prev, ...(ledgerData as LedgerEntry[])]);
+    } else {
+      await loadAll();
+    }
     setPayTarget(null);
     toast(t(lang, 'toastPaymentRecorded'));
   }
@@ -234,6 +294,7 @@ export default function App() {
   const [nmAmount, setNmAmount] = useState('');
   const [nmRef, setNmRef] = useState('');
   const [nmNote, setNmNote] = useState('');
+  const [nmVendor, setNmVendor] = useState('');
   const [nmSaving, setNmSaving] = useState(false);
 
   async function addNmEntry() {
@@ -242,7 +303,7 @@ export default function App() {
     setNmSaving(true);
     const { data, error } = await supabase.from('ledger_entries').insert({
       type: nmType, date: nmDate, amount: amt, ref: nmRef || null,
-      note: nmNote || null, auto: false,
+      note: nmNote || null, auto: false, vendor: nmVendor || null,
     }).select().single();
     if (error || !data) { toast(t(lang, 'toastSaved'), 'err'); setNmSaving(false); return; }
     setLedger((prev) => [...prev, data as LedgerEntry]);
@@ -301,7 +362,7 @@ export default function App() {
 
   async function saveBillEdit(b: Bill) {
     const { error } = await supabase.from('bills').update({
-      date: b.date, preparer: b.preparer, remarks: b.remarks,
+      date: b.date, preparer: b.preparer, remarks: b.remarks, vendor: b.vendor,
     }).eq('id', b.id);
     if (error) { toast(t(lang, 'toastSaved'), 'err'); return; }
     await loadAll();
@@ -311,7 +372,7 @@ export default function App() {
 
   async function saveLedgerEdit(l: LedgerEntry) {
     const { error } = await supabase.from('ledger_entries').update({
-      date: l.date, amount: l.amount, ref: l.ref, note: l.note,
+      date: l.date, amount: l.amount, ref: l.ref, note: l.note, vendor: l.vendor,
     }).eq('id', l.id);
     if (error) { toast(t(lang, 'toastSaved'), 'err'); return; }
     await loadAll();
@@ -319,15 +380,91 @@ export default function App() {
     toast(t(lang, 'toastLedgerUpdated'));
   }
 
-  // Running balance for NM ledger
+  // ---- NM Ledger: per-station selection & running balance ----
+  const ledgerVendorList = useMemo(() => {
+    const set = new Set<string>();
+    vendorSuggestions.forEach((v) => set.add(v));
+    ledger.forEach((l) => { if (l.vendor) set.add(l.vendor); });
+    return Array.from(set);
+  }, [vendorSuggestions, ledger]);
+  const hasUnassignedLedger = useMemo(() => ledger.some((l) => !l.vendor), [ledger]);
+
+  const [selectedLedgerVendor, setSelectedLedgerVendor] = useState<string>('');
+  useEffect(() => {
+    if (!selectedLedgerVendor && ledgerVendorList.length > 0) setSelectedLedgerVendor(ledgerVendorList[0]);
+  }, [ledgerVendorList, selectedLedgerVendor]);
+  useEffect(() => { setNmVendor(selectedLedgerVendor); }, [selectedLedgerVendor]);
+
+  const filteredLedger = useMemo(() => {
+    if (selectedLedgerVendor === '__unassigned__') return ledger.filter((l) => !l.vendor);
+    if (!selectedLedgerVendor) return [];
+    return ledger.filter((l) => l.vendor === selectedLedgerVendor);
+  }, [ledger, selectedLedgerVendor]);
+
   const ledgerRows = useMemo(() => {
     let bal = 0;
-    return ledger.map((l) => {
+    return filteredLedger.map((l) => {
       bal += l.type === 'purchase' ? Number(l.amount) : -Number(l.amount);
       return { ...l, balance: bal };
     });
-  }, [ledger]);
+  }, [filteredLedger]);
   const outstanding = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].balance : 0;
+
+  // ---- Station ledger statement: month / date-wise filter for Print & PDF ----
+  const [nmStmtMonth, setNmStmtMonth] = useState('');
+  const [nmStmtFrom, setNmStmtFrom] = useState('');
+  const [nmStmtTo, setNmStmtTo] = useState('');
+  const [showStatement, setShowStatement] = useState(false);
+
+  function pickMonth(m: string) {
+    setNmStmtMonth(m);
+    if (m) {
+      const [y, mo] = m.split('-').map(Number);
+      const lastDay = new Date(y, mo, 0).getDate();
+      setNmStmtFrom(`${m}-01`);
+      setNmStmtTo(`${m}-${String(lastDay).padStart(2, '0')}`);
+    } else {
+      setNmStmtFrom(''); setNmStmtTo('');
+    }
+  }
+  function clearStmtFilter() {
+    setNmStmtMonth(''); setNmStmtFrom(''); setNmStmtTo('');
+  }
+
+  const stmtStartIndex = useMemo(() => {
+    if (!nmStmtFrom) return 0;
+    return ledgerRows.findIndex((r) => r.date >= nmStmtFrom);
+  }, [ledgerRows, nmStmtFrom]);
+
+  const statementRows = useMemo(() => {
+    if (!nmStmtFrom && !nmStmtTo) return ledgerRows;
+    return ledgerRows.filter((r) => (!nmStmtFrom || r.date >= nmStmtFrom) && (!nmStmtTo || r.date <= nmStmtTo));
+  }, [ledgerRows, nmStmtFrom, nmStmtTo]);
+
+  const statementOpeningBalance = useMemo(() => {
+    if (!nmStmtFrom || stmtStartIndex <= 0) return 0;
+    return ledgerRows[stmtStartIndex - 1].balance;
+  }, [ledgerRows, nmStmtFrom, stmtStartIndex]);
+
+  const statementClosingBalance = statementRows.length > 0
+    ? statementRows[statementRows.length - 1].balance
+    : statementOpeningBalance;
+
+  const statementPeriodLabel = useMemo(() => {
+    if (!nmStmtFrom && !nmStmtTo) return t(lang, 'stmtAllTime');
+    return `${nmStmtFrom || '…'} — ${nmStmtTo || '…'}`;
+  }, [nmStmtFrom, nmStmtTo, lang]);
+
+  // Outstanding balance per station, for the selector pills
+  const vendorBalances = useMemo(() => {
+    const map = new Map<string, number>();
+    ledger.forEach((l) => {
+      const key = l.vendor || '__unassigned__';
+      const cur = map.get(key) || 0;
+      map.set(key, cur + (l.type === 'purchase' ? Number(l.amount) : -Number(l.amount)));
+    });
+    return map;
+  }, [ledger]);
 
   // ---- UI helpers ----
   const inputCls = 'w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-shadow';
@@ -382,7 +519,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 print:hidden">
         {/* Stat cards */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
           <StatCard icon={TrendingUp} label={t(lang, 'gPurchase')} value={fmt(stats.totalPurchase)} color="emerald" />
@@ -512,6 +649,7 @@ export default function App() {
                           <th className="px-3 py-2 text-right font-medium">{t(lang, 'thQty')}</th>
                           <th className="px-3 py-2 text-right font-medium">{t(lang, 'thMoney')}</th>
                           <th className="px-3 py-2 text-left font-medium">{t(lang, 'thReceipt')}</th>
+                          <th className="px-3 py-2 text-left font-medium">{t(lang, 'thVendor')}</th>
                           <th className="px-3 py-2 text-center font-medium">{t(lang, 'thStatus')}</th>
                           <th className="px-3 py-2"></th>
                         </tr>
@@ -524,6 +662,7 @@ export default function App() {
                             <td className="px-3 py-2.5 text-right whitespace-nowrap">{p.quantity} {p.unit}</td>
                             <td className="px-3 py-2.5 text-right font-semibold">{fmt(Number(p.amount))}</td>
                             <td className="px-3 py-2.5 text-slate-500">{p.receipt_no || '—'}</td>
+                            <td className="px-3 py-2.5 text-slate-500">{p.vendor || '—'}</td>
                             <td className="px-3 py-2.5 text-center">
                               {p.bill_id ? (
                                 <span className="inline-block px-2 py-0.5 text-[11px] font-medium bg-blue-50 text-blue-700 rounded-full">
@@ -568,6 +707,38 @@ export default function App() {
                 </h2>
                 <div className="space-y-3">
                   <div>
+                    <label className={labelCls}>{t(lang, 'billMode')}</label>
+                    <div className="flex gap-1.5 p-1 bg-slate-100 rounded-lg">
+                      <button
+                        onClick={() => changeBillMode('single')}
+                        className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                          billMode === 'single' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                        }`}
+                      >
+                        {t(lang, 'modeSingleStation')}
+                      </button>
+                      <button
+                        onClick={() => changeBillMode('combined')}
+                        className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                          billMode === 'combined' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                        }`}
+                      >
+                        {t(lang, 'modeCombinedStations')}
+                      </button>
+                    </div>
+                  </div>
+                  {billMode === 'single' ? (
+                    <div>
+                      <label className={labelCls}>{t(lang, 'vendorFilter')}</label>
+                      <select value={genVendor} onChange={(e) => changeGenVendor(e.target.value)} className={inputCls}>
+                        {unbilledVendorList.length === 0 && <option value="">—</option>}
+                        {unbilledVendorList.map((v) => <option key={v} value={v}>{v}</option>)}
+                      </select>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-slate-400 bg-slate-50 rounded-lg px-3 py-2 leading-relaxed">{t(lang, 'combinedHint')}</p>
+                  )}
+                  <div>
                     <label className={labelCls}>{t(lang, 'billNo')}</label>
                     <input disabled value={`NP-CNG-${String(meta?.bill_seq || 1).padStart(3, '0')}`}
                       className={inputCls + ' bg-slate-50 text-slate-500 font-mono'} />
@@ -590,7 +761,7 @@ export default function App() {
                     <span className="text-sm text-slate-600">{t(lang, 'selectedTotal')}</span>
                     <span className="font-bold text-emerald-700">{fmt(selectedTotal)}</span>
                   </div>
-                  <button onClick={generateBill} disabled={selectedIds.size === 0 || generating}
+                  <button onClick={generateBill} disabled={selectedIds.size === 0 || generating || (billMode === 'single' && !genVendor)}
                     className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 text-white font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors">
                     <FileText className="w-4 h-4" /> {t(lang, 'generateBill')}
                   </button>
@@ -605,7 +776,7 @@ export default function App() {
                     <h2 className="font-bold text-slate-800">{t(lang, 'selectUnbilled')}</h2>
                     <p className="text-xs text-slate-400 mt-0.5">{t(lang, 'selectUnbilledHint')}</p>
                   </div>
-                  {unbilledPurchases.length > 0 && (
+                  {activeUnbilledPurchases.length > 0 && (
                     <div className="flex gap-1.5">
                       <button onClick={selectAll} className="px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 rounded-md hover:bg-emerald-100">
                         {lang === 'bn' ? 'সব বাছাই' : 'Select all'}
@@ -618,6 +789,10 @@ export default function App() {
                 </div>
                 {unbilledPurchases.length === 0 ? (
                   <p className="px-5 py-10 text-center text-sm text-slate-400">{t(lang, 'emptyUnbilled')}</p>
+                ) : billMode === 'single' && !genVendor ? (
+                  <p className="px-5 py-10 text-center text-sm text-slate-400">{t(lang, 'pickVendorFirst')}</p>
+                ) : activeUnbilledPurchases.length === 0 ? (
+                  <p className="px-5 py-10 text-center text-sm text-slate-400">{t(lang, 'noVendorPurchases')}</p>
                 ) : (
                   <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
                     <table className="w-full text-sm">
@@ -625,13 +800,16 @@ export default function App() {
                         <tr className="bg-slate-50 text-slate-500 text-xs">
                           <th className="px-3 py-2 w-8"></th>
                           <th className="px-3 py-2 text-left font-medium">{t(lang, 'thDate')}</th>
+                          {billMode === 'combined' && (
+                            <th className="px-3 py-2 text-left font-medium">{t(lang, 'thVendorCol')}</th>
+                          )}
                           <th className="px-3 py-2 text-left font-medium">{t(lang, 'thFuel')}</th>
                           <th className="px-3 py-2 text-right font-medium">{t(lang, 'thQty')}</th>
                           <th className="px-3 py-2 text-right font-medium">{t(lang, 'thMoney')}</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {unbilledPurchases.map((p) => (
+                        {activeUnbilledPurchases.map((p) => (
                           <tr key={p.id}
                             className={`cursor-pointer transition-colors ${selectedIds.has(p.id) ? 'bg-emerald-50' : 'hover:bg-slate-50'}`}
                             onClick={() => toggleSelect(p.id)}>
@@ -643,6 +821,9 @@ export default function App() {
                               </div>
                             </td>
                             <td className="px-3 py-2.5 whitespace-nowrap">{p.date}</td>
+                            {billMode === 'combined' && (
+                              <td className="px-3 py-2.5 text-slate-500">{p.vendor || '—'}</td>
+                            )}
                             <td className="px-3 py-2.5 font-medium">{p.fuel_type}</td>
                             <td className="px-3 py-2.5 text-right whitespace-nowrap">{p.quantity} {p.unit}</td>
                             <td className="px-3 py-2.5 text-right font-semibold">{fmt(Number(p.amount))}</td>
@@ -673,6 +854,7 @@ export default function App() {
                   <thead>
                     <tr className="bg-slate-50 text-slate-500 text-xs">
                       <th className="px-3 py-2 text-left font-medium">{t(lang, 'thBillNo')}</th>
+                      <th className="px-3 py-2 text-left font-medium">{t(lang, 'thVendorCol')}</th>
                       <th className="px-3 py-2 text-left font-medium">{t(lang, 'thDate')}</th>
                       <th className="px-3 py-2 text-right font-medium">{t(lang, 'thTotal')}</th>
                       <th className="px-3 py-2 text-center font-medium">{t(lang, 'thStatus')}</th>
@@ -685,6 +867,14 @@ export default function App() {
                     {bills.map((b) => (
                       <tr key={b.id} className="hover:bg-slate-50/70 transition-colors">
                         <td className="px-3 py-2.5 font-mono font-medium text-slate-700">{b.bill_no}</td>
+                        <td className="px-3 py-2.5 text-slate-600">
+                          {b.vendor || '—'}
+                          {b.vendor && b.vendor.includes(',') && (
+                            <span className="ml-1.5 inline-block px-1.5 py-0.5 text-[10px] font-medium bg-indigo-50 text-indigo-700 rounded-full align-middle">
+                              {t(lang, 'combinedBadge')}
+                            </span>
+                          )}
+                        </td>
                         <td className="px-3 py-2.5 whitespace-nowrap">{b.date}</td>
                         <td className="px-3 py-2.5 text-right font-semibold">{fmt(Number(b.total_amount))}</td>
                         <td className="px-3 py-2.5 text-center">
@@ -739,6 +929,11 @@ export default function App() {
                 </h2>
                 <div className="space-y-3">
                   <div>
+                    <label className={labelCls}>{t(lang, 'nmVendor')}</label>
+                    <Autocomplete id="nm-vendor" value={nmVendor} onChange={setNmVendor}
+                      suggestions={vendorSuggestions} className={inputCls} onEnter={addNmEntry} />
+                  </div>
+                  <div>
                     <label className={labelCls}>{t(lang, 'nmType')}</label>
                     <select value={nmType} onChange={(e) => setNmType(e.target.value as 'purchase' | 'payment')} className={inputCls}>
                       <option value="purchase">{t(lang, 'nmTypePurchase')}</option>
@@ -751,8 +946,9 @@ export default function App() {
                   </div>
                   <div>
                     <label className={labelCls}>{t(lang, 'nmAmount')}</label>
-                    <input type="number" inputMode="decimal" step="0.01" min="0" value={nmAmount}
-                      onChange={(e) => setNmAmount(e.target.value)} placeholder="0.00" className={inputCls} />
+                    <input type="text" inputMode="decimal" value={nmAmount}
+                      onChange={(e) => { const v = e.target.value; if (/^\d*\.?\d*$/.test(v)) setNmAmount(v); }}
+                      placeholder="0.00" className={inputCls} />
                   </div>
                   <div>
                     <label className={labelCls}>{t(lang, 'nmRef')}</label>
@@ -774,10 +970,72 @@ export default function App() {
             </div>
 
             <div className="lg:col-span-3">
+              {(ledgerVendorList.length > 0 || hasUnassignedLedger) && (
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {ledgerVendorList.map((v) => {
+                    const bal = vendorBalances.get(v) || 0;
+                    const active = selectedLedgerVendor === v;
+                    return (
+                      <button key={v} onClick={() => setSelectedLedgerVendor(v)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                          active ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                        }`}>
+                        {v} <span className={active ? 'text-emerald-100' : 'text-slate-400'}>· {fmt(bal)}</span>
+                      </button>
+                    );
+                  })}
+                  {hasUnassignedLedger && (
+                    <button onClick={() => setSelectedLedgerVendor('__unassigned__')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                        selectedLedgerVendor === '__unassigned__' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                      }`}>
+                      {t(lang, 'unassignedVendor')} <span className={selectedLedgerVendor === '__unassigned__' ? 'text-emerald-100' : 'text-slate-400'}>· {fmt(vendorBalances.get('__unassigned__') || 0)}</span>
+                    </button>
+                  )}
+                </div>
+              )}
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                 <div className="px-5 py-3.5 border-b border-slate-200">
-                  <h2 className="font-bold text-slate-800">{t(lang, 'nmLedgerTitle')}</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">{t(lang, 'nmLedgerHint')}</p>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h2 className="font-bold text-slate-800">
+                        {t(lang, 'nmLedgerTitle')}
+                        {selectedLedgerVendor && (
+                          <span className="text-slate-400 font-normal">
+                            {' — '}{selectedLedgerVendor === '__unassigned__' ? t(lang, 'unassignedVendor') : selectedLedgerVendor}
+                          </span>
+                        )}
+                      </h2>
+                      <p className="text-xs text-slate-400 mt-0.5">{t(lang, 'nmLedgerHint')}</p>
+                    </div>
+                    <button onClick={() => setShowStatement(true)} disabled={ledgerRows.length === 0}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
+                      <Printer className="w-3.5 h-3.5" /> {t(lang, 'nmPrintPdf')}
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2 mt-3">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-500 mb-1">{t(lang, 'nmStmtMonth')}</label>
+                      <input type="month" value={nmStmtMonth} onChange={(e) => pickMonth(e.target.value)}
+                        className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500" />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-500 mb-1">{t(lang, 'nmStmtFrom')}</label>
+                      <input type="date" value={nmStmtFrom} onChange={(e) => { setNmStmtMonth(''); setNmStmtFrom(e.target.value); }}
+                        className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500" />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-500 mb-1">{t(lang, 'nmStmtTo')}</label>
+                      <input type="date" value={nmStmtTo} onChange={(e) => { setNmStmtMonth(''); setNmStmtTo(e.target.value); }}
+                        className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500" />
+                    </div>
+                    {(nmStmtMonth || nmStmtFrom || nmStmtTo) && (
+                      <button onClick={clearStmtFilter}
+                        className="px-2.5 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors">
+                        {t(lang, 'nmStmtClear')}
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {ledgerRows.length === 0 ? (
                   <p className="px-5 py-10 text-center text-sm text-slate-400">{t(lang, 'emptyNm')}</p>
@@ -787,7 +1045,7 @@ export default function App() {
                       <thead className="sticky top-0">
                         <tr className="bg-slate-50 text-slate-500 text-xs">
                           <th className="px-3 py-2 text-left font-medium">{t(lang, 'thDate')}</th>
-                          <th className="px-3 py-2 text-left font-medium">{t(lang, 'thDesc')}</th>
+                          <th className="px-3 py-2 text-left font-medium min-w-[240px]">{t(lang, 'thDesc')}</th>
                           <th className="px-3 py-2 text-left font-medium">{t(lang, 'thRef')}</th>
                           <th className="px-3 py-2 text-right font-medium">{t(lang, 'thPurchaseCol')}</th>
                           <th className="px-3 py-2 text-right font-medium">{t(lang, 'thPaymentCol')}</th>
@@ -845,6 +1103,17 @@ export default function App() {
       )}
       {viewBill && (
         <BillViewModal bill={viewBill} purchases={viewBillPurchases} lang={lang} onClose={() => setViewBill(null)} />
+      )}
+      {showStatement && (
+        <LedgerStatementModal
+          station={selectedLedgerVendor === '__unassigned__' ? t(lang, 'unassignedVendor') : selectedLedgerVendor || '—'}
+          lang={lang}
+          rows={statementRows}
+          openingBalance={statementOpeningBalance}
+          closingBalance={statementClosingBalance}
+          periodLabel={statementPeriodLabel}
+          onClose={() => setShowStatement(false)}
+        />
       )}
 
       {/* Edit modals */}
@@ -954,6 +1223,7 @@ function EditBillModal({ data, lang, onClose, onSave }: {
         </div>
         <div className="grid grid-cols-1 gap-3">
           <div><label className={labelCls}>{t(lang, 'date')}</label><input type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} className={inputCls} /></div>
+          <div><label className={labelCls}>{t(lang, 'nmVendor')}</label><input value={f.vendor ?? ''} onChange={(e) => setF({ ...f, vendor: e.target.value || null })} className={inputCls} /></div>
           <div><label className={labelCls}>{t(lang, 'preparer')}</label><input value={f.preparer ?? ''} onChange={(e) => setF({ ...f, preparer: e.target.value || null })} className={inputCls} /></div>
           <div><label className={labelCls}>{t(lang, 'remarks')}</label><input value={f.remarks ?? ''} onChange={(e) => setF({ ...f, remarks: e.target.value || null })} className={inputCls} /></div>
         </div>
@@ -970,8 +1240,13 @@ function EditLedgerModal({ data, lang, onClose, onSave }: {
   data: LedgerEntry; lang: Lang; onClose: () => void; onSave: (l: LedgerEntry) => void;
 }) {
   const [f, setF] = useState<LedgerEntry>(data);
+  const [amountStr, setAmountStr] = useState(String(data.amount ?? ''));
   const inputCls = 'w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500';
   const labelCls = 'block text-xs font-medium text-slate-600 mb-1';
+  function handleSave() {
+    const amt = parseFloat(amountStr);
+    onSave({ ...f, amount: isNaN(amt) ? 0 : amt });
+  }
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6">
@@ -979,15 +1254,21 @@ function EditLedgerModal({ data, lang, onClose, onSave }: {
           <h3 className="font-bold text-slate-800">{t(lang, 'editLedger')}</h3>
           <button onClick={onClose} className="p-1 rounded text-slate-400 hover:text-slate-600 hover:bg-slate-100"><X className="w-5 h-5" /></button>
         </div>
-        <div className="grid grid-cols-1 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <div><label className={labelCls}>{t(lang, 'date')}</label><input type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} className={inputCls} /></div>
-          <div><label className={labelCls}>{t(lang, 'amount')}</label><input type="number" step="0.01" value={f.amount} onChange={(e) => setF({ ...f, amount: +e.target.value })} className={inputCls} /></div>
-          <div><label className={labelCls}>{t(lang, 'ref')}</label><input value={f.ref ?? ''} onChange={(e) => setF({ ...f, ref: e.target.value || null })} className={inputCls} /></div>
-          <div><label className={labelCls}>{t(lang, 'note')}</label><input value={f.note ?? ''} onChange={(e) => setF({ ...f, note: e.target.value || null })} className={inputCls} /></div>
+          <div>
+            <label className={labelCls}>{t(lang, 'amount')}</label>
+            <input type="text" inputMode="decimal" value={amountStr}
+              onChange={(e) => { const v = e.target.value; if (/^\d*\.?\d*$/.test(v)) setAmountStr(v); }}
+              className={inputCls} />
+          </div>
+          <div className="col-span-2"><label className={labelCls}>{t(lang, 'thDesc')}</label><input value={f.note ?? ''} onChange={(e) => setF({ ...f, note: e.target.value || null })} className={inputCls} /></div>
+          <div><label className={labelCls}>{t(lang, 'thRef')}</label><input value={f.ref ?? ''} onChange={(e) => setF({ ...f, ref: e.target.value || null })} className={inputCls} /></div>
+          <div><label className={labelCls}>{t(lang, 'nmVendor')}</label><input value={f.vendor ?? ''} onChange={(e) => setF({ ...f, vendor: e.target.value || null })} className={inputCls} /></div>
         </div>
         <div className="mt-5 flex gap-2 justify-end">
           <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors">{t(lang, 'cancel')}</button>
-          <button onClick={() => onSave(f)} className="px-4 py-2 text-sm font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors">{t(lang, 'save')}</button>
+          <button onClick={handleSave} className="px-4 py-2 text-sm font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors">{t(lang, 'save')}</button>
         </div>
       </div>
     </div>

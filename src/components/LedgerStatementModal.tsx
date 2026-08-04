@@ -22,7 +22,7 @@ export default function LedgerStatementModal({ station, lang, rows, openingBalan
 
   return (
     <div className="fixed inset-0 z-40 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 print:contents">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[90vh] overflow-auto print:contents">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-auto print:contents">
         {/* Header bar */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 print:hidden">
           <h3 className="text-lg font-bold text-slate-800">{t(lang, 'stmtTitle')}</h3>
@@ -45,7 +45,7 @@ export default function LedgerStatementModal({ station, lang, rows, openingBalan
               <h1 className="text-xl font-bold text-emerald-800 print:text-base">Nippon Paint (Bangladesh) Pvt. Ltd.</h1>
             </div>
             <p className="text-xs text-slate-500 print:text-[10px] mb-0.5">
-              {t(lang, 'companyAddress')}
+              আর.এস. প্লট নং: ৩৩৩-৩৩৭, ৬৪-৬৭, বরংগাইল, শিবালয়, মানিকগঞ্জ।
             </p>
             <p className="text-sm text-slate-600 print:text-xs">{t(lang, 'stmtTitle')}</p>
           </div>
@@ -71,16 +71,7 @@ export default function LedgerStatementModal({ station, lang, rows, openingBalan
           </div>
 
           {/* Entries table */}
-          <table className="w-full text-sm border border-slate-300 mb-6 print:mb-2 print:text-xs table-fixed">
-            <colgroup>
-              <col className="w-[4%]" />
-              <col className="w-[11%]" />
-              <col className="w-[30%]" />
-              <col className="w-[11%]" />
-              <col className="w-[16%]" />
-              <col className="w-[16%]" />
-              <col className="w-[16%]" />
-            </colgroup>
+          <table className="w-full text-sm border border-slate-300 mb-6 print:mb-2 print:text-xs">
             <thead>
               <tr className="bg-emerald-50 text-slate-700">
                 <th className="border border-slate-300 px-2 py-2 print:py-1 text-center">#</th>
@@ -102,19 +93,19 @@ export default function LedgerStatementModal({ station, lang, rows, openingBalan
               ) : (
                 rows.map((l, i) => (
                   <tr key={l.id} className="hover:bg-slate-50">
-                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center whitespace-nowrap">{i + 1}</td>
-                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center whitespace-nowrap">{l.date}</td>
-                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-left leading-snug break-words">
+                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">{i + 1}</td>
+                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">{l.date}</td>
+                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">
                       {l.note || (l.type === 'purchase' ? t(lang, 'nmDescPurchase') : t(lang, 'nmDescPayment'))}
                     </td>
-                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center whitespace-nowrap">{l.ref || '—'}</td>
-                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center whitespace-nowrap">
+                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">{l.ref || '—'}</td>
+                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">
                       {l.type === 'purchase' ? fmt(Number(l.amount)) : '—'}
                     </td>
-                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center whitespace-nowrap">
+                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center">
                       {l.type === 'payment' ? fmt(Number(l.amount)) : '—'}
                     </td>
-                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center font-medium whitespace-nowrap">{fmt(l.balance)}</td>
+                    <td className="border border-slate-300 px-2 py-1.5 print:py-0.5 text-center font-medium">{fmt(l.balance)}</td>
                   </tr>
                 ))
               )}
@@ -122,7 +113,7 @@ export default function LedgerStatementModal({ station, lang, rows, openingBalan
             <tfoot>
               <tr className="bg-emerald-100 font-bold">
                 <td colSpan={6} className="border border-slate-300 px-2 py-2 print:py-1 text-right">{t(lang, 'stmtClosingBal')}</td>
-                <td className="border border-slate-300 px-2 py-2 print:py-1 text-center whitespace-nowrap">{fmt(closingBalance)}</td>
+                <td className="border border-slate-300 px-2 py-2 print:py-1 text-center">{fmt(closingBalance)}</td>
               </tr>
             </tfoot>
           </table>

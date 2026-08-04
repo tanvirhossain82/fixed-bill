@@ -31,6 +31,7 @@ export type Bill = {
   payment_amount: number | null;
   preparer: string | null;
   remarks: string | null;
+  vendor: string | null;
   created_at: string;
 };
 
@@ -44,6 +45,7 @@ export type LedgerEntry = {
   source_purchase_id: string | null;
   source_bill_id: string | null;
   auto: boolean;
+  vendor: string | null;
   created_at: string;
 };
 
