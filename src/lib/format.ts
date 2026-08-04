@@ -3,9 +3,9 @@ export function todayISO(): string {
 }
 
 export function fmt(n: number): string {
-  return '৳ ' + Math.round(Number(n) || 0).toLocaleString('en-BD', {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
+  return '৳ ' + Number(n || 0).toLocaleString('en-BD', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
   });
 }
 
